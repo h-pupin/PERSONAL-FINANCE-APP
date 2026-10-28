@@ -1,0 +1,15 @@
+# Banco de dados e dados pessoais
+*.db
+financas.db
+fatura.ofx
+*.ofx
+
+# Ambiente virtual Python
+venv/
+.venv/
+env/
+
+# Cache do Python e Streamlit
+__pycache__/
+*.py[cod]
+.streamlit/secrets.toml
