@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from sqlalchemy import text
 from database import (
     SessionLocal, 
     Transacao, 
@@ -145,94 +146,142 @@ if st.sidebar.button("🚪 Terminar Sessão"):
 st.sidebar.markdown("---")
 
 # ==============================================================================
-# FUNÇÕES DE PERSISTÊNCIA E CONFIGURAÇÃO
+# FUNÇÕES DE PERSISTÊNCIA E CONFIGURAÇÃO BLINDADAS
 # ==============================================================================
 def obter_saldo_salvo() -> float:
     session = SessionLocal()
-    config = session.query(Configuracao).filter_by(chave="saldo_mensal", user_id=current_user_id).first()
-    session.close()
-    if config:
-        try:
+    try:
+        config = session.query(Configuracao).filter_by(chave="saldo_mensal", user_id=current_user_id).first()
+        if config:
             return float(config.valor)
-        except ValueError:
-            return 5000.0
+    except Exception:
+        session.rollback()
+        try:
+            config = session.query(Configuracao).filter_by(chave="saldo_mensal").first()
+            if config:
+                return float(config.valor)
+        except Exception:
+            session.rollback()
+    finally:
+        session.close()
     return 5000.0
 
 def salvar_saldo(novo_saldo: float):
     session = SessionLocal()
-    config = session.query(Configuracao).filter_by(chave="saldo_mensal", user_id=current_user_id).first()
-    if not config:
-        config = Configuracao(chave="saldo_mensal", valor=str(novo_saldo), user_id=current_user_id)
-        session.add(config)
-    else:
-        config.valor = str(novo_saldo)
-    session.commit()
-    session.close()
+    try:
+        config = session.query(Configuracao).filter_by(chave="saldo_mensal", user_id=current_user_id).first()
+        if not config:
+            config = Configuracao(chave="saldo_mensal", valor=str(novo_saldo), user_id=current_user_id)
+            session.add(config)
+        else:
+            config.valor = str(novo_saldo)
+        session.commit()
+    except Exception:
+        session.rollback()
+        try:
+            config = session.query(Configuracao).filter_by(chave="saldo_mensal").first()
+            if not config:
+                config = Configuracao(chave="saldo_mensal", valor=str(novo_saldo))
+                session.add(config)
+            else:
+                config.valor = str(novo_saldo)
+            session.commit()
+        except Exception:
+            session.rollback()
+    finally:
+        session.close()
 
 def obter_config_divisao(user_id: int):
     session = SessionLocal()
-    cfg_ativa = session.query(Configuracao).filter_by(chave="divide_gastos", user_id=user_id).first()
-    cfg_nome = session.query(Configuracao).filter_by(chave="nome_parceiro", user_id=user_id).first()
-    session.close()
-
-    divide = (cfg_ativa.valor.lower() == "true") if cfg_ativa else False
-    nome = cfg_nome.valor if cfg_nome else "Mãe"
+    divide = False
+    nome = "Mãe"
+    try:
+        cfg_ativa = session.query(Configuracao).filter_by(chave="divide_gastos", user_id=user_id).first()
+        cfg_nome = session.query(Configuracao).filter_by(chave="nome_parceiro", user_id=user_id).first()
+        if cfg_ativa:
+            divide = (cfg_ativa.valor.lower() == "true")
+        if cfg_nome:
+            nome = cfg_nome.valor
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
     return divide, nome
 
 def salvar_config_divisao(user_id: int, divide: bool, nome: str):
     session = SessionLocal()
-    c_div = session.query(Configuracao).filter_by(chave="divide_gastos", user_id=user_id).first()
-    if not c_div:
-        c_div = Configuracao(chave="divide_gastos", valor=str(divide).lower(), user_id=user_id)
-        session.add(c_div)
-    else:
-        c_div.valor = str(divide).lower()
+    try:
+        c_div = session.query(Configuracao).filter_by(chave="divide_gastos", user_id=user_id).first()
+        if not c_div:
+            c_div = Configuracao(chave="divide_gastos", valor=str(divide).lower(), user_id=user_id)
+            session.add(c_div)
+        else:
+            c_div.valor = str(divide).lower()
 
-    c_nome = session.query(Configuracao).filter_by(chave="nome_parceiro", user_id=user_id).first()
-    if not c_nome:
-        c_nome = Configuracao(chave="nome_parceiro", valor=nome.strip(), user_id=user_id)
-        session.add(c_nome)
-    else:
-        c_nome.valor = nome.strip()
+        c_nome = session.query(Configuracao).filter_by(chave="nome_parceiro", user_id=user_id).first()
+        if not c_nome:
+            c_nome = Configuracao(chave="nome_parceiro", valor=nome.strip(), user_id=user_id)
+            session.add(c_nome)
+        else:
+            c_nome.valor = nome.strip()
 
-    session.commit()
-    session.close()
+        session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
 
 def carregar_categorias():
     session = SessionLocal()
-    cats = session.query(Categoria).order_by(Categoria.nome).all()
-    lista_cats = [c.nome for c in cats]
-    session.close()
+    try:
+        cats = session.query(Categoria).order_by(Categoria.nome).all()
+        lista_cats = [c.nome for c in cats]
+    except Exception:
+        session.rollback()
+        lista_cats = []
+    finally:
+        session.close()
     return lista_cats
 
 def carregar_transacoes():
     session = SessionLocal()
-    query = session.query(
-        Transacao.id,
-        Transacao.data,
-        Transacao.descricao,
-        Transacao.valor,
-        Transacao.fatura_mes,
-        Transacao.parcela_atual,
-        Transacao.total_parcelas,
-        Transacao.da_mae,
-        Categoria.nome.label("categoria"),
-        Cartao.nome.label("cartao")
-    ).filter(Transacao.user_id == current_user_id)\
-     .join(Categoria, Transacao.categoria_id == Categoria.id, isouter=True)\
-     .join(Cartao, Transacao.cartao_id == Cartao.id, isouter=True)
-    
-    df = pd.read_sql(query.statement, session.bind)
-    session.close()
-    if not df.empty:
+    try:
+        query = session.query(
+            Transacao.id,
+            Transacao.data,
+            Transacao.descricao,
+            Transacao.valor,
+            Transacao.fatura_mes,
+            Transacao.parcela_atual,
+            Transacao.total_parcelas,
+            Transacao.da_mae,
+            Categoria.nome.label("categoria"),
+            Cartao.nome.label("cartao")
+        ).filter(Transacao.user_id == current_user_id)\
+         .join(Categoria, Transacao.categoria_id == Categoria.id, isouter=True)\
+         .join(Cartao, Transacao.cartao_id == Cartao.id, isouter=True)
+        
+        df = pd.read_sql(query.statement, session.bind)
+    except Exception:
+        session.rollback()
+        df = pd.DataFrame()
+    finally:
+        session.close()
+        
+    if not df.empty and 'data' in df.columns:
         df['data'] = pd.to_datetime(df['data'])
     return df
 
 def carregar_despesas_fixas():
     session = SessionLocal()
-    query = session.query(DespesaFixa).filter(DespesaFixa.user_id == current_user_id)
-    df = pd.read_sql(query.statement, session.bind)
-    session.close()
+    try:
+        query = session.query(DespesaFixa).filter(DespesaFixa.user_id == current_user_id)
+        df = pd.read_sql(query.statement, session.bind)
+    except Exception:
+        session.rollback()
+        df = pd.DataFrame()
+    finally:
+        session.close()
     return df
 
 st.title("💳 Gestão Financeira Pessoal")
@@ -277,14 +326,18 @@ with st.sidebar.expander("Registar Nova Categoria"):
         sub_cat = st.form_submit_button("Guardar")
         if sub_cat and nova_cat_nome:
             session = SessionLocal()
-            existente = session.query(Categoria).filter_by(nome=nova_cat_nome.strip()).first()
-            if not existente:
-                session.add(Categoria(nome=nova_cat_nome.strip()))
-                session.commit()
-                st.sidebar.success("Categoria registada!")
-            else:
-                st.sidebar.warning("A categoria já se encontra registada!")
-            session.close()
+            try:
+                existente = session.query(Categoria).filter_by(nome=nova_cat_nome.strip()).first()
+                if not existente:
+                    session.add(Categoria(nome=nova_cat_nome.strip()))
+                    session.commit()
+                    st.sidebar.success("Categoria registada!")
+                else:
+                    st.sidebar.warning("A categoria já se encontra registada!")
+            except Exception:
+                session.rollback()
+            finally:
+                session.close()
             st.rerun()
 
 st.sidebar.markdown("---")
@@ -307,7 +360,7 @@ df = carregar_transacoes()
 df_fixas = carregar_despesas_fixas()
 lista_categorias_disponiveis = carregar_categorias()
 
-total_fixas = df_fixas[df_fixas['ativa'] == True]['valor'].sum() if not df_fixas.empty else 0.0
+total_fixas = df_fixas[df_fixas['ativa'] == True]['valor'].sum() if not df_fixas.empty and 'ativa' in df_fixas.columns else 0.0
 
 if df.empty:
     st.info("Nenhuma transação registada para esta conta. Submeta uma fatura OFX na barra lateral.")
@@ -495,44 +548,49 @@ with tab_gerenciar:
 
     if st.button("💾 Guardar Alterações"):
         session = SessionLocal()
-        mapa_cats = {c.nome: c.id for c in session.query(Categoria).all()}
-        
-        for idx, row in tabela_editada.iterrows():
-            t_id = int(row['id'])
-            novo_status_parceiro = bool(row['da_mae']) if divide_gastos else False
-            nome_categoria = str(row['categoria'])
+        try:
+            mapa_cats = {c.nome: c.id for c in session.query(Categoria).all()}
             
-            if nome_categoria not in mapa_cats:
-                nova_entidade = Categoria(nome=nome_categoria)
-                session.add(nova_entidade)
-                session.flush()
-                mapa_cats[nome_categoria] = nova_entidade.id
-            
-            cat_id = mapa_cats[nome_categoria]
-
-            t_atual = session.query(Transacao).filter(
-                Transacao.id == t_id, 
-                Transacao.user_id == current_user_id
-            ).first()
-
-            if t_atual:
-                t_atual.da_mae = novo_status_parceiro
-                t_atual.categoria_id = cat_id
+            for idx, row in tabela_editada.iterrows():
+                t_id = int(row['id'])
+                novo_status_parceiro = bool(row['da_mae']) if divide_gastos else False
+                nome_categoria = str(row['categoria'])
                 
-                if t_atual.total_parcelas > 1:
-                    nome_limpo = limpar_nome_base(t_atual.descricao)
-                    todas_parceladas = session.query(Transacao).filter(
-                        Transacao.total_parcelas > 1, 
-                        Transacao.user_id == current_user_id
-                    ).all()
-                    for tp in todas_parceladas:
-                        if limpar_nome_base(tp.descricao) == nome_limpo:
-                            tp.da_mae = novo_status_parceiro
+                if nome_categoria not in mapa_cats:
+                    nova_entidade = Categoria(nome=nome_categoria)
+                    session.add(nova_entidade)
+                    session.flush()
+                    mapa_cats[nome_categoria] = nova_entidade.id
+                
+                cat_id = mapa_cats[nome_categoria]
 
-        session.commit()
-        session.close()
-        st.success("Alterações guardadas com sucesso!")
-        st.rerun()
+                t_atual = session.query(Transacao).filter(
+                    Transacao.id == t_id, 
+                    Transacao.user_id == current_user_id
+                ).first()
+
+                if t_atual:
+                    t_atual.da_mae = novo_status_parceiro
+                    t_atual.categoria_id = cat_id
+                    
+                    if t_atual.total_parcelas > 1:
+                        nome_limpo = limpar_nome_base(t_atual.descricao)
+                        todas_parceladas = session.query(Transacao).filter(
+                            Transacao.total_parcelas > 1, 
+                            Transacao.user_id == current_user_id
+                        ).all()
+                        for tp in todas_parceladas:
+                            if limpar_nome_base(tp.descricao) == nome_limpo:
+                                tp.da_mae = novo_status_parceiro
+
+            session.commit()
+            st.success("Alterações guardadas com sucesso!")
+        except Exception:
+            session.rollback()
+            st.error("Erro ao guardar alterações.")
+        finally:
+            session.close()
+            st.rerun()
 
 # SEPARADOR 3: PRESTAÇÕES FUTURAS
 with tab_projecoes:
@@ -623,18 +681,23 @@ with tab_fixas:
             
             if submit_fixa and nome_fixa and valor_fixa > 0:
                 session = SessionLocal()
-                nova = DespesaFixa(
-                    nome=nome_fixa, 
-                    valor=valor_fixa, 
-                    categoria=categoria_fixa, 
-                    ativa=True,
-                    user_id=current_user_id
-                )
-                session.add(nova)
-                session.commit()
-                session.close()
-                st.success("Despesa registada!")
-                st.rerun()
+                try:
+                    nova = DespesaFixa(
+                        nome=nome_fixa, 
+                        valor=valor_fixa, 
+                        categoria=categoria_fixa, 
+                        ativa=True,
+                        user_id=current_user_id
+                    )
+                    session.add(nova)
+                    session.commit()
+                    st.success("Despesa registada!")
+                except Exception:
+                    session.rollback()
+                    st.error("Erro ao adicionar despesa fixa.")
+                finally:
+                    session.close()
+                    st.rerun()
 
     with col_fix2:
         st.write("**Despesas Registadas**")
@@ -651,20 +714,25 @@ with tab_fixas:
             
             if st.button("💾 Atualizar Despesas Fixas"):
                 session = SessionLocal()
-                for _, row in editadas_fixas.iterrows():
-                    session.query(DespesaFixa).filter(
-                        DespesaFixa.id == int(row['id']),
-                        DespesaFixa.user_id == current_user_id
-                    ).update({
-                        "ativa": bool(row['ativa']),
-                        "nome": str(row['nome']),
-                        "categoria": str(row['categoria']),
-                        "valor": float(row['valor'])
-                    })
-                session.commit()
-                session.close()
-                st.success("Despesas fixas atualizadas!")
-                st.rerun()
+                try:
+                    for _, row in editadas_fixas.iterrows():
+                        session.query(DespesaFixa).filter(
+                            DespesaFixa.id == int(row['id']),
+                            DespesaFixa.user_id == current_user_id
+                        ).update({
+                            "ativa": bool(row['ativa']),
+                            "nome": str(row['nome']),
+                            "categoria": str(row['categoria']),
+                            "valor": float(row['valor'])
+                        })
+                    session.commit()
+                    st.success("Despesas fixas atualizadas!")
+                except Exception:
+                    session.rollback()
+                    st.error("Erro ao atualizar despesas fixas.")
+                finally:
+                    session.close()
+                    st.rerun()
         else:
             st.info("Nenhuma despesa fixa registada.")
 
