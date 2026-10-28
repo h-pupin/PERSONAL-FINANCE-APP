@@ -4,6 +4,7 @@ from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Boolean, 
     Date, ForeignKey, text
 )
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 # 1. Captura da URL: prioriza st.secrets (Streamlit Cloud), depois os.getenv, depois SQLite local
@@ -18,7 +19,12 @@ except Exception:
 if not DATABASE_URL:
     DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///financas.db")
 
-engine = create_engine(DATABASE_URL)
+# 2. Criação única do engine com NullPool para gerenciar as conexões no Supabase
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    poolclass=NullPool
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
