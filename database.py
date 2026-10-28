@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, 
@@ -53,16 +54,32 @@ class DespesaFixa(Base):
     categoria = Column(String(50), default="Contas Fixas")
     ativa = Column(Boolean, default=True)
 
-# Tabela para salvar preferências e saldo configurado
 class Configuracao(Base):
     __tablename__ = 'configuracoes'
 
     chave = Column(String(50), primary_key=True)
     valor = Column(String(100), nullable=False)
 
-engine = create_engine('sqlite:///financas.db', echo=False)
+# Detecção dinâmica: se estiver no Streamlit Cloud ou com DATABASE_URL, usa PostgreSQL; senão, SQLite local
+database_url = os.getenv("DATABASE_URL")
+
+try:
+    import streamlit as st
+    if hasattr(st, "secrets") and "DATABASE_URL" in st.secrets:
+        database_url = st.secrets["DATABASE_URL"]
+except Exception:
+    pass
+
+if database_url:
+    # Ajuste caso a URI venha com prefixo antigo 'postgres://'
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
+    engine = create_engine(database_url, pool_pre_ping=True)
+else:
+    engine = create_engine('sqlite:///financas.db', echo=False)
+
 Base.metadata.create_all(engine)
 SessionLocal = sessionmaker(bind=engine)
 
 if __name__ == '__main__':
-    print("Banco atualizado com tabela de configurações!")
+    print(f"Banco inicializado com sucesso em: {'Nuvem (PostgreSQL)' if database_url else 'Local (SQLite)'}")
