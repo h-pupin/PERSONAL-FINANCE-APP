@@ -1,85 +1,100 @@
 import os
-from datetime import datetime
+import bcrypt
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, 
-    DateTime, ForeignKey, Boolean
+    create_engine, Column, Integer, String, Float, Boolean, 
+    Date, ForeignKey, text
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
+# 1. Captura da URL: prioriza st.secrets (Streamlit Cloud), depois os.getenv, depois SQLite local
+DATABASE_URL = None
+try:
+    import streamlit as st
+    if "DATABASE_URL" in st.secrets:
+        DATABASE_URL = st.secrets["DATABASE_URL"]
+except Exception:
+    pass
+
+if not DATABASE_URL:
+    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///financas.db")
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-class Cartao(Base):
-    __tablename__ = 'cartoes'
-
+class Usuario(Base):
+    __tablename__ = "usuarios"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    nome = Column(String(50), nullable=False)
-    fechamento_dia = Column(Integer, default=11)
-    vencimento_dia = Column(Integer, default=19)
-
-    transacoes = relationship('Transacao', back_populates='cartao')
+    username = Column(String(50), unique=True, nullable=False)
+    nome = Column(String(100), nullable=False)
+    senha_hash = Column(String(255), nullable=False)
 
 class Categoria(Base):
-    __tablename__ = 'categorias'
-
+    __tablename__ = "categorias"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    nome = Column(String(50), unique=True, nullable=False)
+    nome = Column(String(100), unique=True, nullable=False)
 
-    transacoes = relationship('Transacao', back_populates='categoria')
+class Cartao(Base):
+    __tablename__ = "cartoes"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    nome = Column(String(100), unique=True, nullable=False)
 
 class Transacao(Base):
-    __tablename__ = 'transacoes'
-
+    __tablename__ = "transacoes"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    data = Column(DateTime, nullable=False)
-    descricao = Column(String(150), nullable=False)
+    user_id = Column(Integer, ForeignKey("usuarios.id"), nullable=True)
+    data = Column(Date, nullable=False)
+    descricao = Column(String(255), nullable=False)
     valor = Column(Float, nullable=False)
     fatura_mes = Column(String(7), nullable=False)
     parcela_atual = Column(Integer, default=1)
     total_parcelas = Column(Integer, default=1)
-    
     da_mae = Column(Boolean, default=False)
-    
-    cartao_id = Column(Integer, ForeignKey('cartoes.id'), nullable=True)
-    categoria_id = Column(Integer, ForeignKey('categorias.id'), nullable=True)
-
-    cartao = relationship('Cartao', back_populates='transacoes')
-    categoria = relationship('Categoria', back_populates='transacoes')
+    categoria_id = Column(Integer, ForeignKey("categorias.id"), nullable=True)
+    cartao_id = Column(Integer, ForeignKey("cartoes.id"), nullable=True)
 
 class DespesaFixa(Base):
-    __tablename__ = 'despesas_fixas'
-
+    __tablename__ = "despesas_fixas"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("usuarios.id"), nullable=True)
     nome = Column(String(100), nullable=False)
     valor = Column(Float, nullable=False)
-    categoria = Column(String(50), default="Contas Fixas")
+    categoria = Column(String(100), nullable=False)
     ativa = Column(Boolean, default=True)
 
 class Configuracao(Base):
-    __tablename__ = 'configuracoes'
+    __tablename__ = "configuracoes"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("usuarios.id"), nullable=True)
+    chave = Column(String(50), nullable=False)
+    valor = Column(String(255), nullable=False)
 
-    chave = Column(String(50), primary_key=True)
-    valor = Column(String(100), nullable=False)
+# Cria tabelas novas (como 'usuarios')
+Base.metadata.create_all(bind=engine)
 
-# Detecção dinâmica: se estiver no Streamlit Cloud ou com DATABASE_URL, usa PostgreSQL; senão, SQLite local
-database_url = os.getenv("DATABASE_URL")
+# Auto-migração: adiciona user_id nas tabelas existentes caso ainda não existam no Supabase
+def executar_migracao_user_id():
+    with engine.connect() as conn:
+        for tabela in ["transacoes", "despesas_fixas", "configuracoes"]:
+            try:
+                conn.execute(text(f"ALTER TABLE {tabela} ADD COLUMN IF NOT EXISTS user_id INTEGER;"))
+                conn.commit()
+            except Exception:
+                pass
 
-try:
-    import streamlit as st
-    if hasattr(st, "secrets") and "DATABASE_URL" in st.secrets:
-        database_url = st.secrets["DATABASE_URL"]
-except Exception:
-    pass
+executar_migracao_user_id()
 
-if database_url:
-    # Ajuste caso a URI venha com prefixo antigo 'postgres://'
-    if database_url.startswith("postgres://"):
-        database_url = database_url.replace("postgres://", "postgresql://", 1)
-    engine = create_engine(database_url, pool_pre_ping=True)
-else:
-    engine = create_engine('sqlite:///financas.db', echo=False)
+# Funções de Autenticação
+def criar_usuario(session, username, nome, senha):
+    salt = bcrypt.gensalt()
+    hash_senha = bcrypt.hashpw(senha.encode('utf-8'), salt).decode('utf-8')
+    novo_user = Usuario(username=username.lower().strip(), nome=nome.strip(), senha_hash=hash_senha)
+    session.add(novo_user)
+    session.commit()
+    return novo_user
 
-Base.metadata.create_all(engine)
-SessionLocal = sessionmaker(bind=engine)
-
-if __name__ == '__main__':
-    print(f"Banco inicializado com sucesso em: {'Nuvem (PostgreSQL)' if database_url else 'Local (SQLite)'}")
+def verificar_usuario(session, username, senha):
+    user = session.query(Usuario).filter(Usuario.username == username.lower().strip()).first()
+    if user and bcrypt.checkpw(senha.encode('utf-8'), user.senha_hash.encode('utf-8')):
+        return user
+    return None

@@ -3,7 +3,16 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from database import SessionLocal, Transacao, Categoria, Cartao, DespesaFixa, Configuracao
+from database import (
+    SessionLocal, 
+    Transacao, 
+    Categoria, 
+    Cartao, 
+    DespesaFixa, 
+    Configuracao, 
+    criar_usuario, 
+    verificar_usuario
+)
 from importador import importar_fatura_ofx, limpar_nome_base
 import tempfile
 import os
@@ -18,13 +27,10 @@ st.set_page_config(
 # Estilização CSS Moderna
 st.markdown("""
 <style>
-    /* Estilo geral e fontes */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
     }
-    
-    /* Cards métricos customizados */
     .metric-card {
         background: linear-gradient(135deg, rgba(30, 41, 59, 0.7), rgba(15, 23, 42, 0.8));
         border: 1px solid rgba(255, 255, 255, 0.08);
@@ -58,8 +64,6 @@ st.markdown("""
         color: #64748b;
         margin-top: 4px;
     }
-    
-    /* Abas personalizadas */
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
     }
@@ -77,9 +81,75 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ==============================================================================
+# CONTROLO DE AUTENTICAÇÃO E SESSÃO
+# ==============================================================================
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+    st.session_state["user_id"] = None
+    st.session_state["user_name"] = ""
+
+def login_screen():
+    st.title("🔐 Acesso ao Painel Financeiro")
+    tab_login, tab_register = st.tabs(["Entrar", "Criar Conta"])
+
+    with tab_login:
+        with st.form("form_login"):
+            username = st.text_input("Nome de Utilizador")
+            password = st.text_input("Palavra-passe", type="password")
+            submitted = st.form_submit_button("Entrar")
+            if submitted:
+                session = SessionLocal()
+                user = verificar_usuario(session, username, password)
+                session.close()
+                if user:
+                    st.session_state["logged_in"] = True
+                    st.session_state["user_id"] = user.id
+                    st.session_state["user_name"] = user.nome
+                    st.rerun()
+                else:
+                    st.error("Utilizador ou palavra-passe incorretos.")
+
+    with tab_register:
+        with st.form("form_register"):
+            new_name = st.text_input("Nome Completo")
+            new_user = st.text_input("Nome de Utilizador")
+            new_pass = st.text_input("Palavra-passe", type="password")
+            reg_submitted = st.form_submit_button("Criar Conta")
+            if reg_submitted:
+                if not new_user or not new_pass or not new_name:
+                    st.warning("Preencha todos os campos!")
+                else:
+                    session = SessionLocal()
+                    try:
+                        criar_usuario(session, new_user, new_name, new_pass)
+                        st.success("Conta criada com sucesso! Aceda agora ao separador 'Entrar'.")
+                    except Exception:
+                        st.error("Erro ao criar conta. Este nome de utilizador já se encontra registado.")
+                    finally:
+                        session.close()
+
+if not st.session_state["logged_in"]:
+    login_screen()
+    st.stop()
+
+current_user_id = st.session_state["user_id"]
+
+# Barra lateral: dados da conta
+st.sidebar.markdown(f"👤 Sessão iniciada: **{st.session_state['user_name']}**")
+if st.sidebar.button("🚪 Terminar Sessão"):
+    st.session_state["logged_in"] = False
+    st.session_state["user_id"] = None
+    st.session_state["user_name"] = ""
+    st.rerun()
+st.sidebar.markdown("---")
+
+# ==============================================================================
+# FUNÇÕES DE PERSISTÊNCIA E CONFIGURAÇÃO
+# ==============================================================================
 def obter_saldo_salvo() -> float:
     session = SessionLocal()
-    config = session.query(Configuracao).filter_by(chave="saldo_mensal").first()
+    config = session.query(Configuracao).filter_by(chave="saldo_mensal", user_id=current_user_id).first()
     session.close()
     if config:
         try:
@@ -90,12 +160,41 @@ def obter_saldo_salvo() -> float:
 
 def salvar_saldo(novo_saldo: float):
     session = SessionLocal()
-    config = session.query(Configuracao).filter_by(chave="saldo_mensal").first()
+    config = session.query(Configuracao).filter_by(chave="saldo_mensal", user_id=current_user_id).first()
     if not config:
-        config = Configuracao(chave="saldo_mensal", valor=str(novo_saldo))
+        config = Configuracao(chave="saldo_mensal", valor=str(novo_saldo), user_id=current_user_id)
         session.add(config)
     else:
         config.valor = str(novo_saldo)
+    session.commit()
+    session.close()
+
+def obter_config_divisao(user_id: int):
+    session = SessionLocal()
+    cfg_ativa = session.query(Configuracao).filter_by(chave="divide_gastos", user_id=user_id).first()
+    cfg_nome = session.query(Configuracao).filter_by(chave="nome_parceiro", user_id=user_id).first()
+    session.close()
+
+    divide = (cfg_ativa.valor.lower() == "true") if cfg_ativa else False
+    nome = cfg_nome.valor if cfg_nome else "Mãe"
+    return divide, nome
+
+def salvar_config_divisao(user_id: int, divide: bool, nome: str):
+    session = SessionLocal()
+    c_div = session.query(Configuracao).filter_by(chave="divide_gastos", user_id=user_id).first()
+    if not c_div:
+        c_div = Configuracao(chave="divide_gastos", valor=str(divide).lower(), user_id=user_id)
+        session.add(c_div)
+    else:
+        c_div.valor = str(divide).lower()
+
+    c_nome = session.query(Configuracao).filter_by(chave="nome_parceiro", user_id=user_id).first()
+    if not c_nome:
+        c_nome = Configuracao(chave="nome_parceiro", valor=nome.strip(), user_id=user_id)
+        session.add(c_nome)
+    else:
+        c_nome.valor = nome.strip()
+
     session.commit()
     session.close()
 
@@ -119,7 +218,8 @@ def carregar_transacoes():
         Transacao.da_mae,
         Categoria.nome.label("categoria"),
         Cartao.nome.label("cartao")
-    ).join(Categoria, Transacao.categoria_id == Categoria.id, isouter=True)\
+    ).filter(Transacao.user_id == current_user_id)\
+     .join(Categoria, Transacao.categoria_id == Categoria.id, isouter=True)\
      .join(Cartao, Transacao.cartao_id == Cartao.id, isouter=True)
     
     df = pd.read_sql(query.statement, session.bind)
@@ -130,18 +230,19 @@ def carregar_transacoes():
 
 def carregar_despesas_fixas():
     session = SessionLocal()
-    df = pd.read_sql(session.query(DespesaFixa).statement, session.bind)
+    query = session.query(DespesaFixa).filter(DespesaFixa.user_id == current_user_id)
+    df = pd.read_sql(query.statement, session.bind)
     session.close()
     return df
 
 st.title("💳 Gestão Financeira Pessoal")
 
-# Sidebar
+# Barra Lateral - Configurações Gerais
 st.sidebar.header("⚙️ Configurações & Saldo")
 
 saldo_banco = obter_saldo_salvo()
 saldo_informado = st.sidebar.number_input(
-    "Seu Saldo / Renda do Mês (R$)",
+    "O seu Saldo / Rendimento do Mês (R$)",
     min_value=0.0,
     value=saldo_banco,
     step=100.0
@@ -150,35 +251,57 @@ saldo_informado = st.sidebar.number_input(
 if saldo_informado != saldo_banco:
     salvar_saldo(saldo_informado)
 
+# Definições de Partilha de Despesas
+divide_ativo_banco, nome_parceiro_banco = obter_config_divisao(current_user_id)
+
+st.sidebar.subheader("👥 Divisão de Fatura")
+divide_gastos = st.sidebar.checkbox(
+    "Divide a fatura com outra pessoa?", 
+    value=divide_ativo_banco,
+    help="Ativa a atribuição de despesas e o extrato em separado para liquidação."
+)
+
+nome_parceiro = nome_parceiro_banco
+if divide_gastos:
+    nome_parceiro = st.sidebar.text_input("Nome da pessoa / vínculo:", value=nome_parceiro_banco)
+
+if (divide_gastos != divide_ativo_banco) or (nome_parceiro != nome_parceiro_banco):
+    salvar_config_divisao(current_user_id, divide_gastos, nome_parceiro)
+    st.rerun()
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏷️ Categorias")
-with st.sidebar.expander("Cadastrar Nova Categoria"):
+with st.sidebar.expander("Registar Nova Categoria"):
     with st.form("form_nova_cat", clear_on_submit=True):
         nova_cat_nome = st.text_input("Nome da Categoria", placeholder="Ex: Farmácia, Carro...")
-        sub_cat = st.form_submit_button("Salvar")
+        sub_cat = st.form_submit_button("Guardar")
         if sub_cat and nova_cat_nome:
             session = SessionLocal()
             existente = session.query(Categoria).filter_by(nome=nova_cat_nome.strip()).first()
             if not existente:
                 session.add(Categoria(nome=nova_cat_nome.strip()))
                 session.commit()
-                st.sidebar.success(f"Categoria criada!")
+                st.sidebar.success("Categoria registada!")
             else:
-                st.sidebar.warning("Categoria já existe!")
+                st.sidebar.warning("A categoria já se encontra registada!")
             session.close()
             st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📁 Importar Fatura")
-uploaded_file = st.sidebar.file_uploader("Subir Fatura (.ofx)", type=["ofx"], key="uploader_ofx")
+uploaded_file = st.sidebar.file_uploader("Submeter Fatura (.ofx)", type=["ofx"], key="uploader_ofx")
 if uploaded_file is not None:
     conteudo_bytes = uploaded_file.getvalue()
-    qtd_importadas = importar_fatura_ofx(conteudo_bytes, nome_cartao="Nubank")
+    try:
+        qtd_importadas = importar_fatura_ofx(conteudo_bytes, nome_cartao="Nubank", user_id=current_user_id)
+    except TypeError:
+        qtd_importadas = importar_fatura_ofx(conteudo_bytes, nome_cartao="Nubank")
+        
     if qtd_importadas > 0:
         st.sidebar.success(f"{qtd_importadas} transações importadas!")
         st.rerun()
     else:
-        st.sidebar.info("Nenhuma transação nova encontrada nesta fatura.")
+        st.sidebar.info("Nenhuma transação nova detetada nesta fatura.")
 
 df = carregar_transacoes()
 df_fixas = carregar_despesas_fixas()
@@ -187,7 +310,7 @@ lista_categorias_disponiveis = carregar_categorias()
 total_fixas = df_fixas[df_fixas['ativa'] == True]['valor'].sum() if not df_fixas.empty else 0.0
 
 if df.empty:
-    st.info("Nenhuma transação encontrada no banco de dados. Faça o upload de uma fatura OFX.")
+    st.info("Nenhuma transação registada para esta conta. Submeta uma fatura OFX na barra lateral.")
     st.stop()
 
 # Filtros
@@ -201,90 +324,102 @@ df_fatura = df[df['fatura_mes'] == fatura_sel].copy()
 if cartao_sel != "Todos":
     df_fatura = df_fatura[df_fatura['cartao'] == cartao_sel]
 
-df_henrique = df_fatura[df_fatura['da_mae'] == False]
-df_mae = df_fatura[df_fatura['da_mae'] == True]
+# Separação de valores conforme a opção de divisão
+if divide_gastos:
+    df_titular = df_fatura[df_fatura['da_mae'] == False]
+    df_parceiro = df_fatura[df_fatura['da_mae'] == True]
+    total_titular = df_titular['valor'].sum()
+    total_parceiro = df_parceiro['valor'].sum()
+else:
+    df_titular = df_fatura
+    df_parceiro = pd.DataFrame()
+    total_titular = df_fatura['valor'].sum()
+    total_parceiro = 0.0
 
-total_fatura_geral = df_fatura['valor'].sum()
-total_henrique = df_henrique['valor'].sum()
-total_mae = df_mae['valor'].sum()
+total_comprometido_mes = total_titular + total_fixas
+saldo_restante = saldo_informado - total_comprometido_mes
 
-total_comprometido_mes = total_henrique + total_fixas
-saldo_restante_henrique = saldo_informado - total_comprometido_mes
-
-# Cards Modernos no Topo
 def format_reais(val):
     return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-c1, c2, c3, c4, c5 = st.columns(5)
+# Painel de Métricas do Topo
+num_colunas = 5 if divide_gastos else 4
+cols = st.columns(num_colunas)
 
-with c1:
+with cols[0]:
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-title">Renda / Saldo</div>
+        <div class="metric-title">Rendimento / Saldo</div>
         <div class="metric-value">{format_reais(saldo_informado)}</div>
-        <div class="metric-sub">Base mensal cadastrada</div>
+        <div class="metric-sub">Base mensal registada</div>
     </div>
     """, unsafe_allow_html=True)
 
-with c2:
+with cols[1]:
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-title">Sua Fatura</div>
-        <div class="metric-value">{format_reais(total_henrique)}</div>
-        <div class="metric-sub">{len(df_henrique)} compras suas</div>
+        <div class="metric-title">A sua Fatura</div>
+        <div class="metric-value">{format_reais(total_titular)}</div>
+        <div class="metric-sub">{len(df_titular)} despesas suas</div>
     </div>
     """, unsafe_allow_html=True)
 
-with c3:
+with cols[2]:
     st.markdown(f"""
     <div class="metric-card">
         <div class="metric-title">Despesas Fixas</div>
         <div class="metric-value">{format_reais(total_fixas)}</div>
-        <div class="metric-sub">Contas recorrentes ativas</div>
+        <div class="metric-sub">Encargos fixos ativos</div>
     </div>
     """, unsafe_allow_html=True)
 
-with c4:
+col_index_saldo = 3
+if divide_gastos:
+    with cols[3]:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">Parte: {nome_parceiro}</div>
+            <div class="metric-value">{format_reais(total_parceiro)}</div>
+            <div class="metric-sub">Total a receber/abater</div>
+        </div>
+        """, unsafe_allow_html=True)
+    col_index_saldo = 4
+
+saldo_class = "metric-positive" if saldo_restante >= 0 else "metric-negative"
+pct_livre = ((saldo_restante / saldo_informado) * 100) if saldo_informado > 0 else 0
+
+with cols[col_index_saldo]:
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-title">Parte da Mãe</div>
-        <div class="metric-value">{format_reais(total_mae)}</div>
-        <div class="metric-sub">Total a receber/abater</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-saldo_class = "metric-positive" if saldo_restante_henrique >= 0 else "metric-negative"
-pct_livre = ((saldo_restante_henrique / saldo_informado) * 100) if saldo_informado > 0 else 0
-
-with c5:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-title">Saldo Livre Real</div>
-        <div class="metric-value {saldo_class}">{format_reais(saldo_restante_henrique)}</div>
-        <div class="metric-sub">{pct_livre:.1f}% do saldo total livre</div>
+        <div class="metric-title">Saldo Livre Efetivo</div>
+        <div class="metric-value {saldo_class}">{format_reais(saldo_restante)}</div>
+        <div class="metric-sub">{pct_livre:.1f}% do rendimento disponível</div>
     </div>
     """, unsafe_allow_html=True)
 
 st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 
-# Abas de Gestão
-tab_painel, tab_gerenciar, tab_projecoes, tab_fixas, tab_mae = st.tabs([
-    "📊 Visão Geral", 
-    "✍️ Editar / Categorizar", 
-    "🔮 Parcelas Futuras", 
-    "📌 Despesas Fixas", 
-    "👩‍👧 Extrato da Mãe"
-])
+# Estruturação Dinâmica dos Separadores
+titulos_abas = ["📊 Visão Geral", "✍️ Editar / Categorizar", "🔮 Prestações Futuras", "📌 Despesas Fixas"]
+if divide_gastos:
+    titulos_abas.append(f"👩‍👧 Extrato: {nome_parceiro}")
 
-# Paleta refinada para gráficos
+abas = st.tabs(titulos_abas)
+
+tab_painel = abas[0]
+tab_gerenciar = abas[1]
+tab_projecoes = abas[2]
+tab_fixas = abas[3]
+tab_parceiro = abas[4] if divide_gastos else None
+
 CORES_CHART = ["#8b5cf6", "#3b82f6", "#10b981", "#f59e0b", "#ec4899", "#6366f1", "#14b8a6"]
 
-# ABA: VISÃO GERAL
+# SEPARADOR 1: VISÃO GERAL
 with tab_painel:
     g1, g2 = st.columns([3, 2])
     with g1:
-        st.subheader(f"Evolução Diária de Gastos ({fatura_sel})")
-        df_dia = df_henrique.groupby(df_henrique['data'].dt.date)['valor'].sum().reset_index()
+        st.subheader(f"Evolução Diária de Despesas ({fatura_sel})")
+        df_dia = df_titular.groupby(df_titular['data'].dt.date)['valor'].sum().reset_index()
         fig_linha = px.line(
             df_dia, 
             x='data', 
@@ -302,8 +437,8 @@ with tab_painel:
         st.plotly_chart(fig_linha, use_container_width=True)
 
     with g2:
-        st.subheader("Categorias de Gasto")
-        df_cat = df_henrique.groupby('categoria')['valor'].sum().reset_index()
+        st.subheader("Categorias de Despesa")
+        df_cat = df_titular.groupby('categoria')['valor'].sum().reset_index()
         fig_pizza = px.pie(
             df_cat, 
             names='categoria', 
@@ -313,36 +448,42 @@ with tab_painel:
             template="plotly_dark"
         )
         fig_pizza.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)', 
             margin=dict(l=10, r=10, t=30, b=10)
         )
         st.plotly_chart(fig_pizza, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("Suas Transações Nesta Fatura")
-    df_henrique_exibir = df_henrique[['data', 'descricao', 'categoria', 'parcela_atual', 'total_parcelas', 'valor']].copy()
-    df_henrique_exibir['data'] = df_henrique_exibir['data'].dt.strftime('%d/%m/%Y')
-    df_henrique_exibir['parcela'] = df_henrique_exibir['parcela_atual'].astype(str) + "/" + df_henrique_exibir['total_parcelas'].astype(str)
-    df_henrique_exibir['valor'] = df_henrique_exibir['valor'].apply(format_reais)
-    st.dataframe(df_henrique_exibir.drop(columns=['parcela_atual', 'total_parcelas']), use_container_width=True)
+    st.subheader("As suas Transações Nesta Fatura")
+    df_titular_exibir = df_titular[['data', 'descricao', 'categoria', 'parcela_atual', 'total_parcelas', 'valor']].copy()
+    df_titular_exibir['data'] = df_titular_exibir['data'].dt.strftime('%d/%m/%Y')
+    df_titular_exibir['parcela'] = df_titular_exibir['parcela_atual'].astype(str) + "/" + df_titular_exibir['total_parcelas'].astype(str)
+    df_titular_exibir['valor'] = df_titular_exibir['valor'].apply(format_reais)
+    st.dataframe(df_titular_exibir.drop(columns=['parcela_atual', 'total_parcelas']), use_container_width=True)
 
-# ABA: EDITAR CATEGORIAS E ATRIBUIR COMPRAS DA MÃE
+# SEPARADOR 2: GESTÃO E ATRIBUIÇÃO
 with tab_gerenciar:
-    st.subheader(f"Gerenciar Transações da Fatura {fatura_sel}")
-    st.caption("Reclassifique categorias e vincule compras parceladas da sua mãe com persistência automática.")
+    st.subheader(f"Gerir Transações da Fatura {fatura_sel}")
+    st.caption("Reclassifique categorias e defina a titularidade das despesas com persistência direta.")
 
-    editor_df = df_fatura[['id', 'da_mae', 'data', 'descricao', 'categoria', 'valor']].copy()
+    campos_editor = ['id', 'data', 'descricao', 'categoria', 'valor']
+    if divide_gastos:
+        campos_editor.insert(1, 'da_mae')
+
+    editor_df = df_fatura[campos_editor].copy()
     editor_df['data'] = editor_df['data'].dt.strftime('%d/%m/%Y')
     opcoes_categorias = sorted(list(set(lista_categorias_disponiveis + editor_df['categoria'].dropna().tolist())))
 
     colunas_config = {
         "id": None,
-        "da_mae": st.column_config.CheckboxColumn("Compra da Mãe?", default=False),
         "data": st.column_config.TextColumn("Data", disabled=True),
         "descricao": st.column_config.TextColumn("Descrição", disabled=True),
         "categoria": st.column_config.SelectboxColumn("Categoria", options=opcoes_categorias, required=True),
         "valor": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f", disabled=True)
     }
+
+    if divide_gastos:
+        colunas_config["da_mae"] = st.column_config.CheckboxColumn(f"Despesa de {nome_parceiro}?", default=False)
 
     tabela_editada = st.data_editor(
         editor_df,
@@ -352,13 +493,13 @@ with tab_gerenciar:
         key="editor_transacoes_full"
     )
 
-    if st.button("💾 Salvar Alterações de Categorias e Titularidade"):
+    if st.button("💾 Guardar Alterações"):
         session = SessionLocal()
         mapa_cats = {c.nome: c.id for c in session.query(Categoria).all()}
         
         for idx, row in tabela_editada.iterrows():
             t_id = int(row['id'])
-            novo_status_mae = bool(row['da_mae'])
+            novo_status_parceiro = bool(row['da_mae']) if divide_gastos else False
             nome_categoria = str(row['categoria'])
             
             if nome_categoria not in mapa_cats:
@@ -369,30 +510,41 @@ with tab_gerenciar:
             
             cat_id = mapa_cats[nome_categoria]
 
-            t_atual = session.query(Transacao).filter(Transacao.id == t_id).first()
+            t_atual = session.query(Transacao).filter(
+                Transacao.id == t_id, 
+                Transacao.user_id == current_user_id
+            ).first()
+
             if t_atual:
-                t_atual.da_mae = novo_status_mae
+                t_atual.da_mae = novo_status_parceiro
                 t_atual.categoria_id = cat_id
                 
                 if t_atual.total_parcelas > 1:
                     nome_limpo = limpar_nome_base(t_atual.descricao)
-                    todas_parceladas = session.query(Transacao).filter(Transacao.total_parcelas > 1).all()
+                    todas_parceladas = session.query(Transacao).filter(
+                        Transacao.total_parcelas > 1, 
+                        Transacao.user_id == current_user_id
+                    ).all()
                     for tp in todas_parceladas:
                         if limpar_nome_base(tp.descricao) == nome_limpo:
-                            tp.da_mae = novo_status_mae
+                            tp.da_mae = novo_status_parceiro
 
         session.commit()
         session.close()
-        st.success("Alterações salvas!")
+        st.success("Alterações guardadas com sucesso!")
         st.rerun()
 
-# ABA: PARCELAS FUTURAS
+# SEPARADOR 3: PRESTAÇÕES FUTURAS
 with tab_projecoes:
-    st.subheader("🔮 Parcelas Futuras Mês a Mês")
+    st.subheader("🔮 Prestações Futuras Mês a Mês")
     
-    tipo_visao = st.radio("Visualizar parcelamentos futuros de:", ["Seus Gastos", "Gastos da Mãe"], horizontal=True)
-    df_alvo = df[df['da_mae'] == False] if tipo_visao == "Seus Gastos" else df[df['da_mae'] == True]
-    
+    if divide_gastos:
+        tipo_visao = st.radio("Visualizar prestações futuras de:", ["As suas Despesas", f"Despesas de {nome_parceiro}"], horizontal=True)
+        df_alvo = df[df['da_mae'] == False] if tipo_visao == "As suas Despesas" else df[df['da_mae'] == True]
+    else:
+        tipo_visao = "As suas Despesas"
+        df_alvo = df
+
     df_parcelados = df_alvo[df_alvo['total_parcelas'] > 1].copy()
     projecoes = []
 
@@ -437,9 +589,9 @@ with tab_projecoes:
             st.plotly_chart(fig_bar, use_container_width=True)
 
         with col_proj2:
-            st.write(f"**Detalhes das Parcelas ({tipo_visao})**")
+            st.write(f"**Detalhes das Prestações ({tipo_visao})**")
             faturas_futuras_opcoes = ["Todas"] + sorted(list(df_proj['fatura_destino'].unique()))
-            fatura_futura_sel = st.selectbox("Selecione o mês para inspecionar:", faturas_futuras_opcoes, key="sel_fut_mae")
+            fatura_futura_sel = st.selectbox("Selecione o mês:", faturas_futuras_opcoes, key="sel_fut_parceiro")
             
             df_detalhe_proj = df_proj if fatura_futura_sel == "Todas" else df_proj[df_proj['fatura_destino'] == fatura_futura_sel]
             
@@ -447,39 +599,45 @@ with tab_projecoes:
             df_detalhe_exibir.rename(columns={
                 'fatura_destino': 'Fatura',
                 'descricao': 'Compra',
-                'parcela_projetada': 'Parcela',
+                'parcela_projetada': 'Prestação',
                 'categoria': 'Categoria',
                 'valor': 'Valor'
             }, inplace=True)
             df_detalhe_exibir['Valor'] = df_detalhe_exibir['Valor'].apply(format_reais)
             st.dataframe(df_detalhe_exibir, use_container_width=True, height=280)
     else:
-        st.info(f"Nenhum parcelamento futuro ativo para: {tipo_visao}.")
+        st.info(f"Nenhuma prestação futura ativa para: {tipo_visao}.")
 
-# ABA: DESPESAS FIXAS
+# SEPARADOR 4: DESPESAS FIXAS
 with tab_fixas:
-    st.subheader("📌 Cadastro de Despesas Fixas")
+    st.subheader("📌 Registo de Despesas Fixas")
     col_fix1, col_fix2 = st.columns([1, 2])
     
     with col_fix1:
         with st.form("form_nova_fixa", clear_on_submit=True):
             st.write("**Nova Despesa Fixa**")
-            nome_fixa = st.text_input("Nome da Despesa", placeholder="Ex: Aluguel")
+            nome_fixa = st.text_input("Designação", placeholder="Ex: Renda de Casa / Aluguer")
             valor_fixa = st.number_input("Valor Mensal (R$)", min_value=0.0, step=10.0)
-            categoria_fixa = st.text_input("Categoria", value="Moradia")
+            categoria_fixa = st.text_input("Categoria", value="Habitação")
             submit_fixa = st.form_submit_button("Adicionar Despesa")
             
             if submit_fixa and nome_fixa and valor_fixa > 0:
                 session = SessionLocal()
-                nova = DespesaFixa(nome=nome_fixa, valor=valor_fixa, categoria=categoria_fixa, ativa=True)
+                nova = DespesaFixa(
+                    nome=nome_fixa, 
+                    valor=valor_fixa, 
+                    categoria=categoria_fixa, 
+                    ativa=True,
+                    user_id=current_user_id
+                )
                 session.add(nova)
                 session.commit()
                 session.close()
-                st.success(f"Despesa cadastrada!")
+                st.success("Despesa registada!")
                 st.rerun()
 
     with col_fix2:
-        st.write("**Despesas Cadastradas**")
+        st.write("**Despesas Registadas**")
         if not df_fixas.empty:
             df_fixas_editor = df_fixas[['id', 'ativa', 'nome', 'categoria', 'valor']].copy()
             config_fixas = {
@@ -494,7 +652,10 @@ with tab_fixas:
             if st.button("💾 Atualizar Despesas Fixas"):
                 session = SessionLocal()
                 for _, row in editadas_fixas.iterrows():
-                    session.query(DespesaFixa).filter(DespesaFixa.id == int(row['id'])).update({
+                    session.query(DespesaFixa).filter(
+                        DespesaFixa.id == int(row['id']),
+                        DespesaFixa.user_id == current_user_id
+                    ).update({
                         "ativa": bool(row['ativa']),
                         "nome": str(row['nome']),
                         "categoria": str(row['categoria']),
@@ -505,17 +666,18 @@ with tab_fixas:
                 st.success("Despesas fixas atualizadas!")
                 st.rerun()
         else:
-            st.info("Nenhuma despesa fixa cadastrada ainda.")
+            st.info("Nenhuma despesa fixa registada.")
 
-# ABA: EXTRATO DA MÃE
-with tab_mae:
-    st.subheader(f"Gastos da Mãe - Fatura {fatura_sel}")
-    st.metric("Total a Receber nesta fatura", format_reais(total_mae))
-    if not df_mae.empty:
-        df_mae_exibir = df_mae[['data', 'descricao', 'categoria', 'parcela_atual', 'total_parcelas', 'valor']].copy()
-        df_mae_exibir['data'] = df_mae_exibir['data'].dt.strftime('%d/%m/%Y')
-        df_mae_exibir['parcela'] = df_mae_exibir['parcela_atual'].astype(str) + "/" + df_mae_exibir['total_parcelas'].astype(str)
-        df_mae_exibir['valor'] = df_mae_exibir['valor'].apply(format_reais)
-        st.dataframe(df_mae_exibir.drop(columns=['parcela_atual', 'total_parcelas']), use_container_width=True)
-    else:
-        st.info("Nenhuma compra atribuída a ela nesta fatura.")
+# SEPARADOR 5: EXTRATO DO PARCEIRO (APENAS SE ATIVO)
+if divide_gastos and tab_parceiro is not None:
+    with tab_parceiro:
+        st.subheader(f"Despesas: {nome_parceiro} - Fatura {fatura_sel}")
+        st.metric(f"Total a Receber ({nome_parceiro})", format_reais(total_parceiro))
+        if not df_parceiro.empty:
+            df_parceiro_exibir = df_parceiro[['data', 'descricao', 'categoria', 'parcela_atual', 'total_parcelas', 'valor']].copy()
+            df_parceiro_exibir['data'] = df_parceiro_exibir['data'].dt.strftime('%d/%m/%Y')
+            df_parceiro_exibir['parcela'] = df_parceiro_exibir['parcela_atual'].astype(str) + "/" + df_parceiro_exibir['total_parcelas'].astype(str)
+            df_parceiro_exibir['valor'] = df_parceiro_exibir['valor'].apply(format_reais)
+            st.dataframe(df_parceiro_exibir.drop(columns=['parcela_atual', 'total_parcelas']), use_container_width=True)
+        else:
+            st.info(f"Nenhuma transação atribuída a {nome_parceiro} nesta fatura.")
