@@ -152,19 +152,15 @@ def obter_saldo_salvo() -> float:
     session = SessionLocal()
     try:
         config = session.query(Configuracao).filter_by(chave="saldo_mensal", user_id=current_user_id).first()
-        if config:
+        if config and config.valor:
             return float(config.valor)
-    except Exception:
+        return 5000.0
+    except Exception as e:
         session.rollback()
-        try:
-            config = session.query(Configuracao).filter_by(chave="saldo_mensal").first()
-            if config:
-                return float(config.valor)
-        except Exception:
-            session.rollback()
+        st.sidebar.error(f"Erro ao ler saldo: {e}")
+        return 5000.0
     finally:
         session.close()
-    return 5000.0
 
 def salvar_saldo(novo_saldo: float):
     session = SessionLocal()
@@ -176,25 +172,16 @@ def salvar_saldo(novo_saldo: float):
         else:
             config.valor = str(novo_saldo)
         session.commit()
-    except Exception:
+    except Exception as e:
         session.rollback()
-        try:
-            config = session.query(Configuracao).filter_by(chave="saldo_mensal").first()
-            if not config:
-                config = Configuracao(chave="saldo_mensal", valor=str(novo_saldo))
-                session.add(config)
-            else:
-                config.valor = str(novo_saldo)
-            session.commit()
-        except Exception:
-            session.rollback()
+        st.sidebar.error(f"Erro ao salvar saldo: {e}")
     finally:
         session.close()
 
 def obter_config_divisao(user_id: int):
     session = SessionLocal()
     divide = False
-    nome = "Mãe"
+    nome = "..."
     try:
         cfg_ativa = session.query(Configuracao).filter_by(chave="divide_gastos", user_id=user_id).first()
         cfg_nome = session.query(Configuracao).filter_by(chave="nome_parceiro", user_id=user_id).first()
@@ -294,16 +281,20 @@ st.title("💳 Gestão Financeira Pessoal")
 st.sidebar.header("⚙️ Configurações & Saldo")
 
 saldo_banco = obter_saldo_salvo()
-saldo_informado = st.sidebar.number_input(
-    "O seu Saldo / Rendimento do Mês (R$)",
-    min_value=0.0,
-    value=saldo_banco,
-    step=100.0
-)
 
-if saldo_informado != saldo_banco:
-    salvar_saldo(saldo_informado)
-
+with st.sidebar.form("form_saldo_usuario"):
+    saldo_informado = st.number_input(
+        "O seu Saldo / Rendimento do Mês (R$)",
+        min_value=0.0,
+        value=saldo_banco,
+        step=100.0
+    )
+    salvar_btn = st.form_submit_button("💾 Salvar Saldo")
+    if salvar_btn:
+        salvar_saldo(saldo_informado)
+        st.sidebar.success("Saldo atualizado!")
+        st.rerun()
+        
 # Definições de Partilha de Despesas
 divide_ativo_banco, nome_parceiro_banco = obter_config_divisao(current_user_id)
 
