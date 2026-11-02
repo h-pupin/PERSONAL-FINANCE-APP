@@ -68,6 +68,11 @@ def importar_fatura_ofx(conteudo_bytes: bytes, nome_cartao: str = "Nubank", user
 
         for conta in ofx.accounts:
             for t in conta.statement.transactions:
+
+                # Ignora créditos/pagamentos de fatura (evita somar como despesa)
+                if float(t.amount) >= 0:
+                    continue
+
                 valor = round(abs(float(t.amount)), 2)
                 
                 # Trata data_dt garantindo formato date puro
