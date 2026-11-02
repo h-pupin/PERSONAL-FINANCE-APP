@@ -5,7 +5,6 @@ from dateutil.relativedelta import relativedelta
 from ofxparse import OfxParser
 from database import SessionLocal, Transacao, Cartao, Categoria
 
-# Mapeamento simplificado com as 7 categorias solicitadas
 REGRAS_CATEGORIAS = {
     "Supermercado": [
         "savegnago", "cogeb", "fartura", "minuto pa", "frios estrela", 
@@ -46,18 +45,14 @@ CATEGORIAS_PADRAO = [
 
 def limpar_nome_base(descricao: str) -> str:
     """
-    Remove marcadores de parcelas como '01/10', '(2/5)', ' - Parcela 3'
-    para permitir agrupamentos consistentes de compras parceladas.
+    Remove marcações de parcelas como '01/10', '(2/5)', ' - Parcela 3'
+    para permitir correspondência exata do estabelecimento.
     """
     padrao = r'(\s*[\(\[\-]?\s*\d+\s*[\/\-]\s*\d+\s*[\)\]]?|\s*-\s*parcela\s*\d+)'
     descricao_limpa = re.sub(padrao, '', descricao, flags=re.IGNORECASE)
     return descricao_limpa.strip()
 
 def extrair_parcelas(descricao: str):
-    """
-    Identifica parcelas no formato '02/10' ou '3/12'.
-    Retorna (parcela_atual, total_parcelas). Se não houver, retorna (1, 1).
-    """
     padrao = r'(\d{1,2})\s*[\/\-]\s*(\d{1,2})'
     match = re.search(padrao, descricao)
     if match:
@@ -68,56 +63,64 @@ def extrair_parcelas(descricao: str):
     return 1, 1
 
 def calcular_fatura_mes(data_transacao: datetime, dia_fechamento: int = 11) -> str:
-    """
-    Calcula a competência da fatura (YYYY-MM).
-    Se a transação ocorrer no dia de fecho ou após, pertence à fatura do mês seguinte.
-    """
     if data_transacao.day >= dia_fechamento:
         data_fatura = data_transacao + relativedelta(months=1)
     else:
         data_fatura = data_transacao
     return data_fatura.strftime("%Y-%m")
 
-def identificar_categoria(descricao: str, mapa_categorias: dict, id_padrao: int) -> int:
+def identificar_categoria(descricao: str, mapa_categorias: dict, id_padrao: int, session=None, user_id=None) -> int:
     """
-    Analisa o texto da transação e retorna o ID da categoria correspondente
-    com base nas palavras-chave configuradas.
+    1. Verifica no histórico de transações do próprio usuário se já existe 
+       uma compra anterior com o mesmo nome base classificada manualmente.
+    2. Caso não exista histórico, recorre ao dicionário fixo REGRAS_CATEGORIAS.
+    3. Caso não encontre em nenhuma das regras, atribui 'Outros'.
     """
+    nome_base = limpar_nome_base(descricao)
+
+    # 1. Busca memória histórica no banco
+    if session and user_id:
+        transacao_historico = session.query(Transacao).filter(
+            Transacao.user_id == user_id,
+            Transacao.descricao.ilike(f"%{nome_base}%")
+        ).order_by(Transacao.data.desc(), Transacao.id.desc()).first()
+
+        if transacao_historico and transacao_historico.categoria_id:
+            return transacao_historico.categoria_id
+
+    # 2. Busca por palavras-chave pré-definidas
     desc_normalizada = descricao.lower()
     for cat_nome, termos in REGRAS_CATEGORIAS.items():
         for termo in termos:
             if termo in desc_normalizada:
                 if cat_nome in mapa_categorias:
                     return mapa_categorias[cat_nome]
+
+    # 3. Fallback para 'Outros'
     return id_padrao
 
 def importar_fatura_ofx(conteudo_bytes: bytes, nome_cartao: str = "Nubank", user_id: int = None) -> int:
-    """
-    Analisa o ficheiro OFX, autoclassifica categorias e persiste as transações
-    no PostgreSQL vinculadas ao user_id, evitando duplicatas e pagamentos de fatura.
-    """
     ofx_file = io.BytesIO(conteudo_bytes)
     ofx = OfxParser.parse(ofx_file)
     
     session = SessionLocal()
     
     try:
-        # 1. Garante a existência do cartão
+        # Garante o cartão
         cartao = session.query(Cartao).filter_by(nome=nome_cartao).first()
         if not cartao:
             cartao = Cartao(nome=nome_cartao)
             session.add(cartao)
             session.flush()
 
-        # 2. Assegura que todas as categorias padrão existem no banco
+        # Garante as categorias mínimas no banco
         cats_existentes = {c.nome: c for c in session.query(Categoria).all()}
         for cat_nome in CATEGORIAS_PADRAO:
             if cat_nome not in cats_existentes:
-                nova_cat = Categoria(nome=cat_nome)
-                session.add(nova_cat)
+                session.add(Categoria(nome=cat_nome))
         session.commit()
 
-        # 3. Recarrega mapa de categorias {nome: id}
+        # Mapa em memória {nome: id}
         todas_cats = session.query(Categoria).all()
         mapa_cats = {c.nome: c.id for c in todas_cats}
         id_outros = mapa_cats.get("Outros")
@@ -126,19 +129,17 @@ def importar_fatura_ofx(conteudo_bytes: bytes, nome_cartao: str = "Nubank", user
 
         for conta in ofx.accounts:
             for t in conta.statement.transactions:
-                # Ignora créditos/pagamentos de fatura (evita somar como despesa)
+                # Ignora créditos/pagamentos de fatura
                 if float(t.amount) >= 0:
                     continue
 
                 valor = round(abs(float(t.amount)), 2)
-                
-                # Normaliza data e descrição
                 data_pura = t.date.date() if hasattr(t.date, "date") else t.date
                 descricao = t.memo.strip() if t.memo else (t.payee.strip() if t.payee else "Transação sem descrição")
                 
                 session.flush()
 
-                # Prevenção contra duplicatas no banco
+                # Trava contra duplicatas
                 duplicada = session.query(Transacao).filter(
                     Transacao.user_id == user_id,
                     Transacao.data == data_pura,
@@ -152,8 +153,14 @@ def importar_fatura_ofx(conteudo_bytes: bytes, nome_cartao: str = "Nubank", user
                 parcela_atual, total_parcelas = extrair_parcelas(descricao)
                 fatura_mes = calcular_fatura_mes(t.date)
 
-                # Identificação inteligente de categoria
-                categoria_id = identificar_categoria(descricao, mapa_cats, id_outros)
+                # Prioriza a memória histórica da sua conta
+                categoria_id = identificar_categoria(
+                    descricao=descricao, 
+                    mapa_categorias=mapa_cats, 
+                    id_padrao=id_outros, 
+                    session=session, 
+                    user_id=user_id
+                )
 
                 nova_transacao = Transacao(
                     user_id=user_id,
