@@ -372,7 +372,14 @@ df_fatura = df[df['fatura_mes'] == fatura_sel].copy()
 if cartao_sel != "Todos":
     df_fatura = df_fatura[df_fatura['cartao'] == cartao_sel]
 
-# Separação de valores conforme a opção de divisão
+# Sincroniza com as alterações em tempo real do editor se houver modificações na sessão
+if "editor_transacoes_full" in st.session_state and "edited_rows" in st.session_state["editor_transacoes_full"]:
+    edicoes = st.session_state["editor_transacoes_full"]["edited_rows"]
+    for idx_linha, alteracoes in edicoes.items():
+        if "da_mae" in alteracoes and idx_linha < len(df_fatura):
+            df_fatura.iloc[idx_linha, df_fatura.columns.get_loc('da_mae')] = alteracoes["da_mae"]
+
+# Separação de valores conforme a opção de divisão recalculada
 if divide_gastos:
     df_titular = df_fatura[df_fatura['da_mae'] == False]
     df_parceiro = df_fatura[df_fatura['da_mae'] == True]
@@ -580,12 +587,14 @@ with tab_gerenciar:
 
             session.commit()
             st.success("Alterações guardadas com sucesso!")
+            # Força o recarregamento dos dados atualizados para recalcular o topo de imediato
+            st.session_state.pop("editor_transacoes_full", None)
+            st.rerun()
         except Exception:
             session.rollback()
             st.error("Erro ao guardar alterações.")
         finally:
             session.close()
-            st.rerun()
 
 # SEPARADOR 3: PRESTAÇÕES FUTURAS
 with tab_projecoes:
