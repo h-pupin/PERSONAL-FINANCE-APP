@@ -258,8 +258,9 @@ def carregar_transacoes():
             Categoria.nome.label("categoria"),
             Cartao.nome.label("cartao")
         ).filter(Transacao.user_id == current_user_id)\
-         .join(Categoria, Transacao.categoria_id == Categoria.id, isouter=True)\
-         .join(Cartao, Transacao.cartao_id == Cartao.id, isouter=True)
+        .join(Categoria, Transacao.categoria_id == Categoria.id, isouter=True)\
+        .join(Cartao, Transacao.cartao_id == Cartao.id, isouter=True)\
+        .distinct()
         
         df = pd.read_sql(query.statement, session.bind)
     except Exception:
@@ -268,8 +269,11 @@ def carregar_transacoes():
     finally:
         session.close()
         
-    if not df.empty and 'data' in df.columns:
-        df['data'] = pd.to_datetime(df['data'])
+    if not df.empty:
+        # Garante que nenhum JOIN multiplique as linhas no pandas
+        df = df.drop_duplicates(subset=['id'])
+        if 'data' in df.columns:
+            df['data'] = pd.to_datetime(df['data'])
     return df
 
 def carregar_despesas_fixas():
