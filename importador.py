@@ -5,49 +5,42 @@ from dateutil.relativedelta import relativedelta
 from ofxparse import OfxParser
 from database import SessionLocal, Transacao, Cartao, Categoria
 
-# Mapeamento de palavras-chave para classificação automática de categorias
+# Mapeamento simplificado com as 7 categorias solicitadas
 REGRAS_CATEGORIAS = {
     "Supermercado": [
         "savegnago", "cogeb", "fartura", "minuto pa", "frios estrela", 
         "mercado", "hortifruti", "vovo lucia"
     ],
-    "Alimentação": [
+    "Lazer": [
         "burger king", "ifood", "99food", "padaria", "cooking", "boteco", 
         "cafe", "catarinocafe", "sorvete", "dubelato", "comboio", "yes cooking",
-        "art bakery", "guanabara", "planalto", "nopinhabeach"
+        "art bakery", "guanabara", "planalto", "nopinhabeach", "open bar", "restaurante"
     ],
-    "Transporte": [
-        "sem*parar", "semparar", "zul", "uber", "99app", "posto", "combustivel", "estacionamento"
+    "Carro": [
+        "sem*parar", "semparar", "zul", "uber", "99app", "posto", "combustivel", 
+        "estacionamento", "oficina", "mecanica", "lavacar"
     ],
     "Assinaturas & Serviços": [
         "spotify", "netflix", "apple", "google", "microsoft", "wellhub", 
-        "amazon credito", "ifd*ifood club", "ultravioleta"
+        "amazon credito", "ifd*ifood club", "ultravioleta", "vivo", "claro", 
+        "tim", "cpfl", "sabesp", "boleto", "movame"
     ],
-    "Contas": [
-        "vivo", "claro", "tim", "cpfl", "sabesp", "boleto", "conta vivo"
+    "Farmácia e Saúde": [
+        "drogaria", "farmacia", "kalmia", "medicamento", "hospital", "saude", "clinica"
     ],
-    "Saúde & Farmácia": [
-        "drogaria", "farmacia", "kalmia", "medicamento", "hospital", "saude"
-    ],
-    "Compras & Vestuário": [
+    "Compras": [
         "shopee", "mercadolivre", "mercado*", "magalu", "lojas americanas", 
-        "barbearia", "don capi", "amazon", "tudao tech", "roupa", "calcado"
-    ],
-    "Educação": [
-        "curso", "cursos", "movame", "faculdade", "ifsp", "escola", "livro", "livraria"
+        "barbearia", "don capi", "amazon", "tudao tech", "roupa", "calcado", "fiori"
     ]
 }
 
 CATEGORIAS_PADRAO = [
-    "Alimentação",
     "Supermercado",
-    "Transporte",
+    "Lazer",
+    "Carro",
     "Assinaturas & Serviços",
-    "Lazer & Bares",
-    "Saúde & Farmácia",
-    "Compras & Vestuário",
-    "Educação",
-    "Contas",
+    "Farmácia e Saúde",
+    "Compras",
     "Outros"
 ]
 
